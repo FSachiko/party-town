@@ -5,14 +5,17 @@ using UnityEngine;
 using Photon.Pun;
 using Photon.Realtime;
 using UnityEngine.UI;
+using ExitGames.Client.Photon;
 
 public class PlayerController : MonoBehaviourPun {
     public GameObject deck;
     public GameObject enemy;
+    public GameObject table;
+
+    public GameObject cardPreb;
 
     public Text localHP;
     public Text remoteHP;
-    public Text messageBox;
     public Text username;
     public Text remoteUsername;
     public Text localNumberOfCards;
@@ -42,19 +45,17 @@ public class PlayerController : MonoBehaviourPun {
 
     public bool isFrozen = false;
 
+    public const byte INITIALIZE_PLAYERS_DONE_EVENT = 1;
+
     void Update() {
         localNumberOfCards.text = GameManager.GetLocal().numOfcards.ToString();
         if (this.remoteNumberOfCards.text != GameManager.GetRemote().numOfcards.ToString()) {
             foreach (Transform child in enemy.transform) {
-                GameObject.Destroy(child.gameObject);
+                Destroy(child.gameObject);
             }
 
             for (int i = 0; i < GameManager.GetRemote().numOfcards; i += 1) {
-                GameObject card = PhotonNetwork.Instantiate(
-                    "CardDisplay",
-                    new Vector3(0, 0, 0),
-                    Quaternion.identity
-                );
+                GameObject card = Instantiate(cardPreb, new Vector3(0, 0, 0), Quaternion.identity);
                 card.transform.Find("CardFront").gameObject.SetActive(false);
                 card.transform.Find("CardBack").gameObject.SetActive(true);
                 card.transform.SetParent(enemy.transform, false);
@@ -68,7 +69,7 @@ public class PlayerController : MonoBehaviourPun {
     }
 
     public void SetCharacter(Character character) {
-        Debug.Log("Player's character is set to " + character.name + "; Player name: " + this.username.text);
+        // Debug.Log("Player's character is set to " + character.name + "; Player name: " + this.username.text);
         this.character = character;
         this.maxHP = character.maxHP;
         this.CharacterName.text = character.name;
@@ -119,37 +120,66 @@ public class PlayerController : MonoBehaviourPun {
     }
 
     public void EndTurn() {
-        if(this.isFrozen)
-            this.DefrozePlayer();
-        if (selectedCard != null) {
+        this.SetPromptText("Turn Ending!");
+        this.FrozePlayer();
+        Invoke("EndTurnSecond", 1);
+        if (selectedCard != null)
+        {
             selectedCard.transform.position = new Vector2(selectedCard.transform.position.x, selectedCard.transform.position.y - CardContainer.SelectedCardYOffset);
             selectedCard = null;
         }
+    }
+
+    public void EndTurnSecond()
+    {
+        if (this.isFrozen)
+            this.DefrozePlayer();
         this.numberOfAttack = 0;
 
         // if the number of cards you have is more than you maxHP
-        if (this.numOfcards > this.maxHP) {
+        if (this.numOfcards > this.maxHP)
+        {
+            GameManager.instance.photonView.RPC("SetMessageBox", RpcTarget.All, GameManager.instance.currentPlayer.player.NickName + " is discarding cards");
             AfterDiscarding callback = delegate () {
                 GameManager.instance.photonView.RPC("SetNextTurn", RpcTarget.All);
+                this.SetPromptText("Your opponent is playing...");
+                GameManager.instance.photonView.RPC("SetMessageBox", RpcTarget.All, GameManager.instance.currentPlayer.player.NickName + "'s turn ends!");
             };
             this.Discard(this.numOfcards - this.maxHP, null, callback);
-        } else {
+        }
+        else
+        {
             GameManager.instance.photonView.RPC("SetNextTurn", RpcTarget.All);
+            this.SetPromptText("Your opponent is playing...");
+            GameManager.instance.photonView.RPC("SetMessageBox", RpcTarget.All, GameManager.instance.currentPlayer.player.NickName + "'s turn ends!");
         }
     }
 
     public void StartTurn() {
-        if (this.character.hasDrawingStageSkill) {
+        GameManager.instance.photonView.RPC("SetMessageBox", RpcTarget.All, GameManager.instance.currentPlayer.player.NickName + "'s turn starts!");
+        this.SetPromptText("Turn starting! Drawing card...");
+        if (this.character.hasDrawingStageSkill)
+        {
             Debug.LogFormat("Character should be using skills now");
             this.character.DrawingStageSkill();
-        } else {
-            InitializeCards(1);
+            Debug.Log("has drawing stage skill");
         }
-        if (this.isFrozen) {
+        else
+        {
+            InitCardWithAnimation(2);
+        }
+        Invoke("StartTurnSecond", 2);
+    }
+
+    public void StartTurnSecond()
+    {
+        this.SetPromptText("Use card wisely!");
+        if (this.isFrozen)
+        {
             this.SetPromptText("You are frozen!");
             Invoke("EndTurn", 2);
         }
-
+        
     }
 
     [PunRPC]
@@ -164,7 +194,10 @@ public class PlayerController : MonoBehaviourPun {
         if (player.IsLocal) {
             this.username.text = player.NickName;
             this.remoteUsername.text = player.GetNext().NickName;
-            InitializeCards(4);
+            InitCardWithAnimation(4);
+            RaiseEventOptions raiseEventOptions = new RaiseEventOptions { Receivers = ReceiverGroup.MasterClient };
+            SendOptions sendOptions = new SendOptions { Reliability = true };
+            PhotonNetwork.RaiseEvent(INITIALIZE_PLAYERS_DONE_EVENT, null, raiseEventOptions, sendOptions);
         } else {
         }
     }
@@ -174,9 +207,11 @@ public class PlayerController : MonoBehaviourPun {
         this.isGettingRequest = true;
         this.enemyCard = enemyCard;
         this.requestedCard = requestedCard;
+        this.SetPromptText("You are under attack! Defense yourself!");
     }
 
     public void SendResponse(bool response) {
+        this.SetPromptText("");
         this.isGettingRequest = false;
         if (response) {
             switch (this.enemyCard) {
@@ -197,7 +232,7 @@ public class PlayerController : MonoBehaviourPun {
                     GameManager.instance.CheckWinCondition();
                     break;
                 case "Special Attack":
-                    int damage = UnityEngine.Random.Range(1, 3);
+                    int damage = this.isFrozen ? 2 : 1;
                     this.currentHP -= damage;
                     SoundManager.PlaySound("pain");
                     if (currentHP < 0) {
@@ -239,37 +274,95 @@ public class PlayerController : MonoBehaviourPun {
         this.isFrozen = false;
     }
 
-    public void InitializeCards(int numOfCards) {
+    public void InitCardWithAnimation(int numOfCards) {
+        photonView.RPC("IncreaseCards", RpcTarget.Others, false, numOfCards);
+        photonView.RPC("IncreaseCards", player, true, numOfCards);
+        GameObject[] cards = new GameObject[numOfCards];
         for (int i = 0; i < numOfCards; i++) {
-            GameObject card = PhotonNetwork.Instantiate(
-                "CardDisplay",
-                new Vector3(0, 0, 0),
-                Quaternion.identity
-            );
-            card.transform.SetParent(deck.transform, false);
-            card.GetPhotonView().RPC("Initialize", RpcTarget.Others, false, null);
-            card.GetPhotonView().RPC("Initialize", player, true, null);
+            GameObject card = Instantiate(cardPreb, new Vector3(0, 0, 0), Quaternion.identity);
+            card.GetComponent<CardContainer>().InitializeCard(null);
+            cards[i] = card;
+        }
+        StartCoroutine(MoveCards(cards));
+        IEnumerator MoveCards(GameObject[] items) {
+            foreach (GameObject item in items) {
+                item.transform.SetParent(table.transform, false);
+                iTween.MoveTo(item, iTween.Hash("position", new Vector3(-800, -375, 0),
+                                                "time", 0.5f,
+                                                "islocal", true,
+                                                "onupdate", "ChangeCardAlpha",
+                                                "onupdatetarget", this.gameObject,
+                                                "onupdateparams", item,
+                                                "oncomplete", "SetCardParentToDeck",
+                                                "oncompletetarget", this.gameObject,
+                                                "oncompleteparams", item));
+                yield return item;
+                yield return new WaitForSeconds(0.3f);
+            }
+        }
+    }
+
+    void SetCardParentToDeck(object item) {
+        GameObject card = ((GameObject)item);
+        card.transform.SetParent(deck.transform, true);
+        card.GetComponent<CanvasGroup>().alpha = 1f;
+    }
+
+    void SetCardParentToEnemy(object item) {
+        GameObject card = ((GameObject)item);
+        card.transform.SetParent(enemy.transform, true);
+        card.GetComponent<CanvasGroup>().alpha = 1f;
+    }
+
+    void ChangeCardAlpha(object item) {
+        GameObject card = ((GameObject)item);
+        card.GetComponent<CanvasGroup>().alpha -= 0.01f;
+    }
+
+    [PunRPC]
+    public void IncreaseCards(bool isMine, int numOfCards) {
+        if (isMine) {
+            GameManager.GetLocal().numOfcards += numOfCards;
+        } else {
+            GameManager.GetRemote().numOfcards += numOfCards;
+        }
+    }
+
+    [PunRPC]
+    void UseCard(bool isMine) {
+        if (isMine) {
+            GameManager.GetLocal().numOfcards--;
+        } else {
+            GameManager.GetRemote().numOfcards--;
         }
     }
 
     [PunRPC]
     public void RmoveCard() {
+        Debug.Log("called");
         int random = UnityEngine.Random.Range(0, deck.transform.childCount);
         Transform child = deck.transform.GetChild(random);
         string label = child.GetComponent<CardContainer>().card.label;
-        child.GetComponent<CardContainer>().photonView.RPC("Use", GameManager.GetRemote().player, false);
-        child.GetComponent<CardContainer>().photonView.RPC("Use", GameManager.GetLocal().player, true);
-        PhotonNetwork.Destroy(child.gameObject);
+        //child.GetComponent<CardContainer>().photonView.RPC("Use", GameManager.GetRemote().player, false);
+        //child.GetComponent<CardContainer>().photonView.RPC("Use", GameManager.GetLocal().player, true);
+        photonView.RPC("UseCard", RpcTarget.Others, false);
+        photonView.RPC("UseCard", player, true);
+        Destroy(child.gameObject);
+        // Animation: card move from deck to enemy.
         SoundManager.PlaySound("cardTaken");
         GameManager.GetRemote().photonView.RPC("GetCard", GameManager.GetRemote().player, label);
     }
 
     [PunRPC]
     public void GetCard(string label) {
-        GameObject card = PhotonNetwork.Instantiate("CardDisplay", new Vector3(0, 0, 0), Quaternion.identity);
-        card.GetPhotonView().RPC("Initialize", RpcTarget.Others, false, label);
-        card.GetPhotonView().RPC("Initialize", player, true, label);
+        photonView.RPC("IncreaseCards", RpcTarget.Others, false, 1);
+        photonView.RPC("IncreaseCards", player, true, 1);
+        GameObject card = Instantiate(cardPreb, new Vector3(0, 0, 0), Quaternion.identity);
+        card.GetComponent<CardContainer>().InitializeCard(label);
+        //card.GetPhotonView().RPC("Initialize", RpcTarget.Others, false, label);
+        //card.GetPhotonView().RPC("Initialize", player, true, label);
         SoundManager.PlaySound("cardTaken");
+        // Animation: card move from enemy to deck.
         card.transform.SetParent(deck.transform, false);
     }
 
@@ -282,6 +375,6 @@ public class PlayerController : MonoBehaviourPun {
         this.discardLabels = label;
         this.discardNum = num;
         this.discardCallback = callback;
-        Debug.LogFormat("PlayerController.Discard(), Num: {0}", num);
+        // Debug.LogFormat("PlayerController.Discard(), Num: {0}", num);
     }
 }
